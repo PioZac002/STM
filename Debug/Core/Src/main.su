@@ -1,0 +1,11 @@
+../Core/Src/main.c:78:9:USART_khbit	4	static
+../Core/Src/main.c:87:9:USART_getchar	16	static
+../Core/Src/main.c:104:9:USART_getline	24	static
+../Core/Src/main.c:137:6:USART_fsend	152	static,ignoring_inline_asm
+../Core/Src/main.c:172:6:HAL_UART_TxCpltCallback	24	static
+../Core/Src/main.c:186:6:HAL_UART_RxCpltCallback	16	static
+../Core/Src/main.c:200:5:main	8	static
+../Core/Src/main.c:246:6:SystemClock_Config	96	static
+../Core/Src/main.c:296:13:MX_USART2_UART_Init	8	static
+../Core/Src/main.c:331:13:MX_GPIO_Init	48	static
+../Core/Src/main.c:371:6:Error_Handler	4	static,ignoring_inline_asm
