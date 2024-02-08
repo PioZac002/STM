@@ -18,21 +18,15 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <string.h>
-#include <stdarg.h>
-#include <string.h>
-#include <time.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <stdlib.h>
-#include <math.h>
-#include <i2c.h>
-#include <i2c.h>
-#include <string.h>
-#include <lps25hb.h>
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdarg.h>
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +39,7 @@
 #define USART_TXBUF_LEN 1512 //Długosc bufora kolowego do nadawania
 #define USART_RXBUF_LEN 512  //Dlugosc bufora odbiorczego
 UART_HandleTypeDef huart2;
+uint8_t timer = 0;
 
 
 uint8_t USART_TxBuf [USART_TXBUF_LEN];
@@ -59,6 +54,29 @@ __IO uint16_t USART_TX_Busy = 0;
 //Wskazniki bufora odbiorczego
 __IO uint16_t USART_RX_Empty = 0;
 __IO uint16_t USART_RX_Busy = 0;
+uint8_t debug = 0;
+
+struct frame
+{
+	uint8_t frameDetected;
+	uint16_t frameSize;
+	char sender[4];
+	char receiver[4];
+	uint8_t dataSize;
+	char *data;
+	uint8_t checksumCalculated;
+	uint8_t checksumFromFrame;
+};
+
+struct measurement
+{
+	uint8_t current;
+	uint16_t interval;
+	int16_t data[512];
+};
+
+struct frame frame;
+struct measurement measurement;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -83,6 +101,18 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void my_tout_1ms()
+{
+	static uint16_t ms = 0;
+	ms++;
+
+	if(ms >= measurement.interval)
+	{
+		ms = 0;
+		timer = 1;
+	}
+}
+
 //Zwraca 0, jesli bufor jest pusty. Natomiast 1, jezeli w buforze cos sie znajduje
 uint8_t USART_khbit()
 {
@@ -160,7 +190,9 @@ void USART_fsend(char* format,...)
 	{
 		USART_TxBuf[idx]=tmp_rx[i];
 		idx++;
-		if (idx>=USART_TXBUF_LEN) idx =0;
+		if (idx>=USART_TXBUF_LEN){
+			idx =0;
+		}
 	}
 
 	__disable_irq(); //Blokuje przerwania w sposób softwerowy
@@ -200,6 +232,158 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 			HAL_UART_Receive_IT(&huart2, &USART_RxBuf[USART_RX_Empty], 1);
 	}
 }
+
+uint8_t calculateChecksum(char* command, uint8_t size)
+{
+	uint16_t checksum = 0;
+	int i;
+
+	for(i = 0; i < size; i++)
+	{
+		checksum += (int)command[i];
+	}
+	checksum %= 100;
+
+	return checksum;
+}
+
+int16_t getArchiveValue(uint16_t i)
+{
+	int pointer = measurement.current - i;
+
+	if(pointer < 0)
+	{
+		pointer = 511 + pointer;
+	}
+
+	return measurement.data[pointer];
+}
+
+void sendFrame(char* data)
+{
+	int dataLength = strlen(data);
+
+	USART_fsend(":STMPC0%03d%s%02d;", dataLength, data, calculateChecksum(data, dataLength));
+}
+
+void executeCommand()
+{
+	// Odczytywanie komendy
+	int i;
+	int j;
+	char* tmp = malloc(frame.dataSize * sizeof(char) + 1);
+	uint8_t detectedParameter = 0;
+
+	for(i = 0; i < frame.dataSize; i++)
+	{
+		if(frame.data[i] == ' ')
+		{
+			detectedParameter = 1;
+			break;
+		}
+		tmp[i] = frame.data[i];
+	}
+	tmp[i] = 0;
+
+	// Odczyt interwału pomiarowego
+	if(strcmp(tmp, "GT") == 0)
+	{
+		sprintf(tmp, "STV %d", measurement.interval);
+		sprintf(tmp, "Aktualny interwal wynosi: %d", measurement.interval);
+		sendFrame(tmp);
+		return;
+	}
+	// Odczyt aktualnej wartości
+	else if(strcmp(tmp, "GM") == 0)
+	{
+
+		sprintf(tmp, " Odczytywanie aktualnej wartosci: SM %d", measurement.data[measurement.current]);
+		sendFrame(tmp);
+		return;
+	}
+	// Ustawienie interwału pomiarowego
+	else if(strcmp(tmp, "ST") == 0)
+	{
+		if(detectedParameter == 0)
+		{
+			// Brak argumentu
+			sprintf(tmp, "ERRARGV");
+			sendFrame(tmp);
+			return;
+		}
+		else
+		{
+			for(i = 3; i < frame.dataSize; i++)
+			{
+				tmp[i - 3] = frame.data[i];
+			}
+			tmp[i - 3] = 0;
+
+			int interval = atoi(tmp);
+
+			if(interval >= 100 && interval <= 10000)
+			{
+				// Informacja o aktualizacji intwrwału pomiarowego
+				measurement.interval = interval;
+				sprintf(tmp, "TU %d", measurement.interval);
+				sendFrame(tmp);
+				return;
+			}
+			else
+			{
+				// Nieprawidłowy zakres argumentu
+				sprintf(tmp, "ERRARGVF");
+				sendFrame(tmp);
+				return;
+			}
+		}
+	}
+	else if(strcmp(tmp, "GAM") == 0)
+		{
+			if(detectedParameter == 0)
+			{
+				// Brak argumentu
+				sprintf(tmp, "ERRARGV");
+				sendFrame(tmp);
+				return;
+			}
+			else
+			{
+				for(i = 3; i < frame.dataSize; i++)
+				{
+					tmp[i - 3] = frame.data[i];
+				}
+
+				int archiveValue = atoi(tmp);
+
+				if(archiveValue >= 1 && archiveValue <= 511)
+				{
+
+
+
+					// Informacja o aktualizacji intwrwału pomiarowego
+					sprintf(tmp, "SAM %d", getArchiveValue(archiveValue));
+					sendFrame(tmp);
+					return;
+				}
+				else
+				{
+					// Nieprawidłowy zakres argumentu
+					sprintf(tmp, "ERRARGVF");
+					sendFrame(tmp);
+					return;
+				}
+			}
+		}
+	// Nie rozpoznana komenda
+	else
+	{
+		sprintf(tmp, "ERRCMD");
+		sendFrame(tmp);
+		return;
+	}
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -233,16 +417,181 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+USART_fsend("STM start\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  // TO DO
+//  MX_I2C1_Init(); // Make sure this is defined and initializes I2C1 properly
+//  LPS25HB_INIT(&hi2c1);
+
+  HAL_UART_Receive_IT(&huart2, &USART_RxBuf[0], 1);
+   int i;
+   char dataSize[4];
+   char checkSum[3];
+   char recievedFrame[269];
+   char recievedChar;
+   uint8_t charCoddingDetected;
+   srand(time(NULL));
+
+   frame.frameDetected = 0;
+   measurement.current = 0;
+   measurement.interval = 1000;
+
   while (1)
-  {USART_fsend("STM start\r\n");
-
+  {
     /* USER CODE END WHILE */
+  	if(timer)
+  	{
+  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 
+  measurement.current++;
+  measurement.data[measurement.current] = rand() % 100;
+
+  if(measurement.current > 511)
+  	measurement.current = 0;
+
+  timer = 0;
+  	}
+
+  	if(USART_khbit())
+  	{
+  recievedChar = USART_getchar();
+
+  if(recievedChar == ':')
+  {
+  	frame.frameDetected = 1;
+  	frame.frameSize = 0;
+  	charCoddingDetected = 0;
+  	continue;
+  }
+
+  if(frame.frameDetected && frame.frameSize < 269)
+  {
+  	// Dekodowanie znaków
+
+  	if(recievedChar == '\\' && charCoddingDetected == 0)
+  	{
+  		charCoddingDetected = 1;
+  	}
+  	else if(charCoddingDetected)
+  	{
+  		if(recievedChar == 'A')
+  		{
+  			recievedFrame[frame.frameSize] = ':';
+  		}
+  		else if(recievedChar == 'B')
+  		{
+  			recievedFrame[frame.frameSize] = ';';
+  		}
+  		else if(recievedChar == 'C')
+  		{
+  			recievedFrame[frame.frameSize] = '\\';
+  		}
+  		else
+  		{
+  			// Nierozpoznane kodowanie
+  			frame.frameDetected = 0;
+  			USART_fsend(":STMPC0002ED%02d;", calculateChecksum("ED", 2));
+  		}
+
+  		frame.frameSize++;
+  		charCoddingDetected = 0;
+  	}
+  	else if(recievedChar == ';')
+  	{
+
+  		if(frame.frameSize < 13)
+  		{
+  			frame.frameDetected = 0;
+  			continue;
+  		}
+
+  		recievedFrame[frame.frameSize] = 0;
+
+  		for(i = 0; i < 3; i++)
+  		{
+  			frame.sender[i] = recievedFrame[i];
+  			frame.receiver[i] = recievedFrame[i + 3];
+  			dataSize[i] = recievedFrame[i + 6];
+  		}
+
+  		frame.sender[3] = 0;
+  		frame.receiver[3] = 0;
+  		dataSize[3] = 0;
+  		frame.dataSize = atoi(dataSize);
+  		frame.data = malloc(frame.dataSize * sizeof(char) + 1);
+
+  		// Przepisanie danych
+  		for(i = 0; i < frame.dataSize; i++)
+  		{
+  			frame.data[i] = recievedFrame[i + 9];
+  		}
+
+  		frame.data[i] = 0;
+
+  		// Odczy
+  		for(i = 0; i < 2; i++)
+  		{
+  			checkSum[i] = recievedFrame[i + 9 + frame.dataSize];
+  		}
+  		checkSum[3] = 0;
+  		frame.checksumFromFrame = atoi(checkSum);
+  		frame.checksumCalculated = calculateChecksum(frame.data, frame.dataSize);
+
+  		if(debug)
+  		{
+  			USART_fsend("\r\n\nDANE Z RAMKI:\r\n", recievedFrame);
+  			USART_fsend("%s\r\n", recievedFrame);
+  			USART_fsend("Sender: %s\r\n", frame.sender);
+  			USART_fsend("Reciever: %s\r\n", frame.receiver);
+  			USART_fsend("Data size: %03d\r\n", frame.dataSize);
+  			USART_fsend("Data: %s\r\n", frame.data);
+  			USART_fsend("Check sum from frame: %02d\r\n", frame.checksumFromFrame);
+  			USART_fsend("Calculated checksum: %02d\r\n", frame.checksumCalculated);
+  		}
+
+
+  		// Ignorowanie ramki nie wysłanej przez PC0
+  		if(strcmp(frame.sender, "PC0") != 0)
+  			continue;
+
+  		// Ignorowanie ramki nie przeznaczonej dla STM
+  		if(strcmp(frame.receiver, "STM") != 0)
+  			continue;
+
+  		// Niewłaściwa suma kontrolna, wysłanie ramki z odpowiednim błędem
+  		if(frame.checksumCalculated != frame.checksumFromFrame)
+  		{
+  			 USART_fsend("Otrzymana suma kontrolna: %02d, Obliczona suma kontrolna: %02d\r\n", frame.checksumFromFrame, frame.checksumCalculated);
+  			USART_fsend("Dane do obliczenia sumy kontrolnej: '%s'\r\n", frame.data);
+  			frame.checksumCalculated = calculateChecksum(frame.data, frame.dataSize);
+  			 USART_fsend(":STMPC0005ERRCS%02d;", calculateChecksum("ERRCS", 5));
+  			continue;
+  		}
+
+  		executeCommand();
+  	}
+  	else
+  	{
+
+
+  		recievedFrame[frame.frameSize] = recievedChar;
+  		frame.frameSize++;
+
+  		if(frame.frameSize >= 269)
+  		{
+  			frame.frameDetected = 0;
+  		}
+
+  	}
+  }
+  else if(frame.frameDetected && frame.frameSize >= 269)
+  {
+  	frame.frameDetected = 0;
+  }
+  	}
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
